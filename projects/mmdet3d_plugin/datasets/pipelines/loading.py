@@ -4,7 +4,9 @@ from typing import Any, Dict, Tuple
 import mmcv
 import numpy as np
 from nuscenes.map_expansion.map_api import NuScenesMap
-from nuscenes.map_expansion.map_api import locations as LOCATIONS
+from nuscenes.map_expansion.map_api import NuScenesMap
+# from nuscenes.map_expansion.map_api import locations as LOCATIONS
+LOCATIONS = ['boston-seaport', 'singapore-hollandvillage', 'singapore-onenorth', 'singapore-queenstown']
 from PIL import Image
 
 

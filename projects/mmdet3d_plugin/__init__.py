@@ -5,6 +5,7 @@ from .core.evaluation.eval_hooks import CustomDistEvalHook
 from .datasets.pipelines import (
   PhotoMetricDistortionMultiViewImage, PadMultiViewImage, 
   NormalizeMultiviewImage,  CustomCollect3D)
+from .datasets import CustomNavsimLocalMapDataset
 from .models.backbones.vovnet import VoVNet
 from .models.utils import *
 from .models.opt.adamw import AdamW2

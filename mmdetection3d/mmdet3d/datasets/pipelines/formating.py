@@ -62,7 +62,14 @@ class DefaultFormatBundle(object):
             else:
                 results[key] = DC(to_tensor(results[key]))
         if 'gt_bboxes_3d' in results:
-            if isinstance(results['gt_bboxes_3d'], BaseInstance3DBoxes):
+            # Import here to avoid circular dependency
+            try:
+                from projects.mmdet3d_plugin.datasets.navsim_map_dataset import LiDARInstanceLines
+                is_lidar_lines = isinstance(results['gt_bboxes_3d'], LiDARInstanceLines)
+            except:
+                is_lidar_lines = False
+            
+            if isinstance(results['gt_bboxes_3d'], BaseInstance3DBoxes) or is_lidar_lines:
                 results['gt_bboxes_3d'] = DC(
                     results['gt_bboxes_3d'], cpu_only=True)
             else:
