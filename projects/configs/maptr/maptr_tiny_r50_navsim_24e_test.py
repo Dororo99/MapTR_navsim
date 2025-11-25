@@ -83,6 +83,7 @@ model = dict(
         code_weights=[1.0, 1.0, 1.0, 1.0],
         transformer=dict(
             type='MapTRPerceptionTransformer',
+            num_cams=8,
             rotate_prev_bev=True,
             use_shift=True,
             use_can_bus=True,
@@ -103,6 +104,7 @@ model = dict(
                         dict(
                             type='GeometrySptialCrossAttention',
                             pc_range=point_cloud_range,
+                            num_cams=8,
                             attention=dict(
                                 type='GeometryKernelAttention',
                                 embed_dims=_dim_,
@@ -208,7 +210,7 @@ test_pipeline = [
 ]
 
 data = dict(
-    samples_per_gpu=2, 
+    samples_per_gpu=1, 
     workers_per_gpu=4,
     train=dict(
         type=dataset_type,
@@ -226,7 +228,8 @@ data = dict(
         padding_value=-10000,
         map_classes=map_classes,
         queue_length=queue_length,
-        box_type_3d='LiDAR'),
+        box_type_3d='LiDAR',
+        filter_empty_gt=False),
     val=dict(type=dataset_type,
              data_root=data_root,
              ann_file=data_root + 'navsim_map_infos_test.pkl', # Use TEST split for val

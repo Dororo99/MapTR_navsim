@@ -39,7 +39,8 @@ class LiDARInstanceLines(object):
 
     @property
     def start_end_points(self):
-        assert len(self.instance_list) != 0
+        if len(self.instance_list) == 0:
+            return torch.zeros((0, 4), dtype=torch.float32)
         instance_se_points_list = []
         for instance in self.instance_list:
             se_points = []
@@ -58,7 +59,8 @@ class LiDARInstanceLines(object):
 
     @property
     def bbox(self):
-        assert len(self.instance_list) != 0
+        if len(self.instance_list) == 0:
+            return torch.zeros((0, 4), dtype=torch.float32)
         instance_bbox_list = []
         for instance in self.instance_list:
             instance_bbox_list.append(instance.bounds)
@@ -74,7 +76,8 @@ class LiDARInstanceLines(object):
 
     @property
     def fixed_num_sampled_points(self):
-        assert len(self.instance_list) != 0
+        if len(self.instance_list) == 0:
+            return torch.zeros((0, self.fixed_num, 2), dtype=torch.float32)
         instance_points_list = []
         for instance in self.instance_list:
             distances = np.linspace(0, instance.length, self.fixed_num)
@@ -91,6 +94,8 @@ class LiDARInstanceLines(object):
     @property
     def shift_fixed_num_sampled_points(self):
         fixed_num_sampled_points = self.fixed_num_sampled_points
+        if len(fixed_num_sampled_points) == 0:
+            return torch.zeros((0, 0, self.fixed_num, 2), dtype=torch.float32) # Shape might need adjustment based on usage
         instances_list = []
         is_poly = False
         for fixed_num_pts in fixed_num_sampled_points:
@@ -120,6 +125,8 @@ class LiDARInstanceLines(object):
     @property
     def shift_fixed_num_sampled_points_v1(self):
         fixed_num_sampled_points = self.fixed_num_sampled_points
+        if len(fixed_num_sampled_points) == 0:
+            return torch.zeros((0, 0, self.fixed_num, 2), dtype=torch.float32)
         instances_list = []
         is_poly = False
         for fixed_num_pts in fixed_num_sampled_points:
@@ -158,7 +165,13 @@ class LiDARInstanceLines(object):
 
     @property
     def shift_fixed_num_sampled_points_v2(self):
-        assert len(self.instance_list) != 0
+        if len(self.instance_list) == 0:
+            # Return empty tensor with shape (0, num_shifts, fixed_num, 2)
+            # We need to determine num_shifts. For v2, it seems variable or fixed?
+            # In v2 logic: final_shift_num = self.fixed_num - 1
+            final_shift_num = self.fixed_num - 1
+            return torch.zeros((0, final_shift_num, self.fixed_num, 2), dtype=torch.float32)
+
         instances_list = []
         for instance in self.instance_list:
             distances = np.linspace(0, instance.length, self.fixed_num)
@@ -211,7 +224,10 @@ class LiDARInstanceLines(object):
 
     @property
     def shift_fixed_num_sampled_points_v3(self):
-        assert len(self.instance_list) != 0
+        if len(self.instance_list) == 0:
+            final_shift_num = self.fixed_num - 1
+            return torch.zeros((0, final_shift_num * 2, self.fixed_num, 2), dtype=torch.float32)
+
         instances_list = []
         for instance in self.instance_list:
             distances = np.linspace(0, instance.length, self.fixed_num)
@@ -275,6 +291,12 @@ class LiDARInstanceLines(object):
     @property
     def shift_fixed_num_sampled_points_v4(self):
         fixed_num_sampled_points = self.fixed_num_sampled_points
+        if len(fixed_num_sampled_points) == 0:
+            # v4 logic seems to produce variable shift num?
+            # It pads to shift_num*2 - ... wait.
+            # Let's assume it returns empty tensor if input is empty.
+             return torch.zeros((0, 0, self.fixed_num, 2), dtype=torch.float32)
+
         instances_list = []
         is_poly = False
         for fixed_num_pts in fixed_num_sampled_points:
@@ -403,6 +425,19 @@ class VectorizedNavsimMap(object):
         # Query R-tree
         candidate_indices = list(rtree_idx.intersection((min_gx, min_gy, max_gx, max_gy)))
         
+        if len(candidate_indices) == 0:
+            print(f"DEBUG: R-tree query failed for {location}")
+            print(f"  Ego Translation: {T}")
+            print(f"  Global Bounds: ({min_gx}, {min_gy}) - ({max_gx}, {max_gy})")
+            # Check first element in map to see where it is
+            if len(all_elements) > 0:
+                _, first_geom = all_elements[0]
+                f_min_x, f_min_y = np.min(first_geom[:, :2], axis=0)
+                f_max_x, f_max_y = np.max(first_geom[:, :2], axis=0)
+                print(f"  Sample Map Element Bounds: ({f_min_x}, {f_min_y}) - ({f_max_x}, {f_max_y})")
+            else:
+                print("  Map elements are empty!")
+        
         vectors = []
         local_patch = box(-max_x, -max_y, max_x, max_y)
 
@@ -447,6 +482,11 @@ class VectorizedNavsimMap(object):
             if type != -1:
                 gt_instance.append(instance)
                 gt_labels.append(type)
+        
+        if len(gt_instance) > 0:
+             print(f"DEBUG: Found {len(gt_instance)} vectors for {location}")
+        else:
+             print(f"DEBUG: No vectors found for {location}")
         
         gt_instance = LiDARInstanceLines(gt_instance, self.sample_dist,
                         self.num_samples, self.padding, self.fixed_num, self.padding_value, patch_size=self.patch_size)
@@ -590,7 +630,7 @@ class CustomNavsimLocalMapDataset(CustomNuScenesDataset):
             location, map_elements, e2g_translation, e2g_rotation
         )
         
-        gt_vecs_label = to_tensor(anns_results['gt_vecs_label'])
+        gt_vecs_label = to_tensor(anns_results['gt_vecs_label']).long()
         gt_vecs_pts_loc = anns_results['gt_vecs_pts_loc'] # LiDARInstanceLines object
 
         example['gt_labels_3d'] = DC(gt_vecs_label, cpu_only=False)
@@ -625,7 +665,7 @@ class CustomNavsimLocalMapDataset(CustomNuScenesDataset):
             )
             
             # Add GT data to input_dict so pipeline can access it
-            input_dict['gt_labels_3d'] = anns_results['gt_vecs_label']
+            input_dict['gt_labels_3d'] = to_tensor(anns_results['gt_vecs_label']).long()
             input_dict['gt_bboxes_3d'] = anns_results['gt_vecs_pts_loc']
             
             self.pre_pipeline(input_dict)

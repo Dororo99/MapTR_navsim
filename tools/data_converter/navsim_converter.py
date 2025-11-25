@@ -26,6 +26,14 @@ NUPLAN_TO_MAPTR = {
     'boundary': ['boundaries', 'generic_drivable_areas'], 
 }
 
+# EPSG codes for UTM zones
+LOCATION_TO_EPSG = {
+    'us-ma-boston': 32619,             # UTM Zone 19N
+    'us-nv-las-vegas-strip': 32611,    # UTM Zone 11N
+    'us-pa-pittsburgh-hazelwood': 32617, # UTM Zone 17N
+    'sg-one-north': 32648,             # UTM Zone 48N
+}
+
 def get_map_vectors_from_city(maps_root, map_version, location):
     """
     geopandas를 사용하여 .gpkg 파일에서 직접 벡터 데이터를 추출합니다.
@@ -49,12 +57,19 @@ def get_map_vectors_from_city(maps_root, map_version, location):
         return {}
 
     map_elements = {cls: [] for cls in NUPLAN_TO_MAPTR.keys()}
-    
+    target_epsg = LOCATION_TO_EPSG.get(location)
+
     for class_name, table_names in NUPLAN_TO_MAPTR.items():
         for table_name in table_names:
             try:
                 gdf = gpd.read_file(gpkg_path, layer=table_name)
                 if gdf.empty: continue
+                
+                # Project to UTM if EPSG is defined
+                if target_epsg:
+                    if gdf.crs is None:
+                        gdf.set_crs(epsg=4326, inplace=True) # Assume WGS84 if undefined
+                    gdf = gdf.to_crs(epsg=target_epsg)
 
                 for geom in gdf.geometry:
                     if geom is None: continue
