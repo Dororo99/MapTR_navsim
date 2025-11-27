@@ -140,6 +140,8 @@ class NuScenesDataset(Custom3DDataset):
         self.eval_version = eval_version
         from nuscenes.eval.detection.config import config_factory
         self.eval_detection_configs = config_factory(self.eval_version)
+        # Fix for pickle error: convert dict_keys to list
+        self.eval_detection_configs.class_names = list(self.eval_detection_configs.class_names)
         if self.modality is None:
             self.modality = dict(
                 use_camera=False,

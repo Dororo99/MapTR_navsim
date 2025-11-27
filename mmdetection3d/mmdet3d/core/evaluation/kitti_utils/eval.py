@@ -5,7 +5,7 @@ import numba
 import numpy as np
 
 
-@numba.jit
+@numba.jit(nopython=True)
 def get_thresholds(scores: np.ndarray, num_gt, num_sample_pts=41):
     scores.sort()
     scores = scores[::-1]

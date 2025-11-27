@@ -285,9 +285,12 @@ class LiDARInstanceLines(object):
 
 class VectorizedLocalMap(object):
     """VAD의 로직을 MapTR용으로 수정"""
-    def __init__(self, dataroot, patch_size, map_classes, sample_dist=1, num_samples=250, padding=False, fixed_ptsnum_per_line=-1, padding_value=-10000):
+    def __init__(self, dataroot, patch_size, map_classes, sample_dist=1, num_samples=250, padding=False, fixed_ptsnum_per_line=-1, padding_value=-10000, map_root=None):
         self.data_root = dataroot
-        self.map_root = os.path.join(dataroot, 'maps') # maps 폴더 경로 추론
+        if map_root:
+            self.map_root = map_root
+        else:
+            self.map_root = os.path.join(dataroot, 'maps') # maps 폴더 경로 추론
         self.map_version = "nuplan-maps-v1.0"
         self.vec_classes = map_classes
         self.patch_size = patch_size
@@ -398,23 +401,64 @@ class CustomNavsimLocalMapDataset(CustomNuScenesDataset):
     MAPCLASSES = ('divider', 'ped_crossing', 'boundary')
 
     def __init__(self, map_ann_file=None, map_fixed_ptsnum_per_line=-1, sensor_root=None, **kwargs):
+        self.pc_range = kwargs.pop('pc_range', None)
+        self.map_classes = kwargs.pop('map_classes', None)
+        self.padding_value = kwargs.pop('padding_value', -10000)
+        self.eval_use_same_gt_sample_num_flag = kwargs.pop('eval_use_same_gt_sample_num_flag', False)
+        
+        if 'fixed_ptsnum_per_line' in kwargs:
+            self.fixed_num = kwargs.pop('fixed_ptsnum_per_line')
+        else:
+            self.fixed_num = map_fixed_ptsnum_per_line
+
         super().__init__(**kwargs)
         self.map_ann_file = map_ann_file
-        self.fixed_num = map_fixed_ptsnum_per_line
         self.sensor_root = sensor_root # 이미지 절대 경로 구성을 위해 필요
 
         # BEV Patch Size 설정
-        patch_h = self.pc_range[4] - self.pc_range[1]
-        patch_w = self.pc_range[3] - self.pc_range[0]
-        self.patch_size = (patch_h, patch_w)
+        if self.pc_range is not None:
+            patch_h = self.pc_range[4] - self.pc_range[1]
+            patch_w = self.pc_range[3] - self.pc_range[0]
+            self.patch_size = (patch_h, patch_w)
 
         # VAD 스타일의 실시간 맵 로더 초기화
+        data_root = kwargs.get('data_root')
+        map_root = os.path.join(data_root, 'download', 'maps')
+        if not os.path.exists(map_root):
+            map_root = os.path.join(data_root, 'maps')
+
         self.vector_map = VectorizedLocalMap(
-            dataroot=kwargs.get('data_root'),
+            dataroot=data_root,
             patch_size=self.patch_size,
             map_classes=self.MAPCLASSES,
-            fixed_ptsnum_per_line=self.fixed_num
+            fixed_ptsnum_per_line=self.fixed_num,
+            map_root=map_root
         )
+
+    def load_annotations(self, ann_file):
+        """Load annotations from ann_file.
+        Args:
+            ann_file (str): Path of the annotation file.
+        Returns:
+            list[dict]: List of annotations.
+        """
+        data = mmcv.load(ann_file)
+        if 'samples' in data:
+            data_infos = data['samples']
+        elif 'infos' in data:
+            data_infos = data['infos']
+        else:
+            raise KeyError(f"Annotation file {ann_file} must contain 'samples' or 'infos' key.")
+            
+        # Sort by timestamp if available
+        if len(data_infos) > 0 and 'timestamp' in data_infos[0]:
+            data_infos = list(sorted(data_infos, key=lambda e: e['timestamp']))
+            
+        # Set version if not present (NuScenesDataset expects it)
+        if not hasattr(self, 'version'):
+             self.version = 'v1.0-trainval' # Default or dummy
+             
+        return data_infos
 
     def get_data_info(self, index):
         info = self.data_infos[index]
@@ -435,8 +479,12 @@ class CustomNavsimLocalMapDataset(CustomNuScenesDataset):
             for cam_name, cam_info in info['cams'].items():
                 # .pkl에는 상대 경로가 있을 수 있으므로 sensor_root와 결합
                 img_path = cam_info['data_path']
-                if self.sensor_root and not img_path.startswith('/'):
-                    img_path = os.path.join(self.sensor_root, img_path)
+                if self.sensor_root:
+                    if img_path.startswith('data/navsim/download/'):
+                        img_path = img_path.replace('data/navsim/download/', '')
+                        img_path = os.path.join(self.sensor_root, img_path)
+                    elif not img_path.startswith('/'):
+                        img_path = os.path.join(self.sensor_root, img_path)
                 image_paths.append(img_path)
                 
                 # MapTR용 행렬 구성

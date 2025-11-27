@@ -230,7 +230,7 @@ data = dict(
         queue_length=queue_length,
         box_type_3d='LiDAR',
         filter_empty_gt=False,
-        sensor_root='/data2/e2e/navsim/download'),
+        sensor_root='/home/byounggun/MapTR/data/navsim/download'),
     val=dict(type=dataset_type,
              data_root=data_root,
              ann_file=data_root + 'navsim_map_infos_test.pkl', # Use TEST split for val
@@ -242,7 +242,7 @@ data = dict(
              eval_use_same_gt_sample_num_flag=eval_use_same_gt_sample_num_flag,
              padding_value=-10000,
              map_classes=map_classes,
-             sensor_root='/data2/e2e/navsim/download',
+             sensor_root='/home/byounggun/MapTR/data/navsim/download',
              classes=class_names, modality=input_modality, samples_per_gpu=1),
     test=dict(type=dataset_type,
               data_root=data_root,
@@ -255,7 +255,7 @@ data = dict(
               eval_use_same_gt_sample_num_flag=eval_use_same_gt_sample_num_flag,
               padding_value=-10000,
               map_classes=map_classes,
-              sensor_root='/data2/e2e/navsim/download',
+              sensor_root='/home/byounggun/MapTR/data/navsim/download',
               classes=class_names, modality=input_modality),
     shuffler_sampler=dict(type='DistributedGroupSampler'),
     nonshuffler_sampler=dict(type='DistributedSampler')
