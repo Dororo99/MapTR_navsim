@@ -10,13 +10,14 @@ from pyquaternion import Quaternion
 from multiprocessing import Pool
 from functools import partial
 from pathlib import Path
-
-# [핵심] nuPlan API 대신 geopandas 직접 사용
+# python tools/data_converter/navsim_converter.py --data-root data/navsim --out-dir data/navsim
+# [핵심] nuPlan API 사용
 try:
-    import geopandas as gpd
-    from shapely.geometry import LineString, Polygon, MultiLineString, MultiPolygon
+    from nuplan.database.maps_db.gpkg_mapsdb import GPKGMapsDB
+    from nuplan.database.maps_db.map_api import NuPlanMapWrapper
+    from nuplan.database.maps_db.map_explorer import NuPlanMapExplorer
 except ImportError:
-    print("ERROR: geopandas가 설치되지 않았습니다. 'pip install geopandas'를 실행하세요.")
+    print("ERROR: nuplan-devkit이 설치되지 않았습니다.")
     exit()
 
 # 실제 테이블 이름 매핑
@@ -36,24 +37,16 @@ LOCATION_TO_EPSG = {
 
 def get_map_vectors_from_city(maps_root, map_version, location):
     """
-    geopandas를 사용하여 .gpkg 파일에서 직접 벡터 데이터를 추출합니다.
+    nuplan-devkit API를 사용하여 맵 벡터 데이터를 추출합니다.
     """
-    print(f"[{location}] 맵 벡터 추출 시작...")
+    print(f"[{location}] 맵 벡터 추출 시작 (API 사용)...")
     
-    map_dir = os.path.join(maps_root, location)
-    if not os.path.exists(map_dir):
-        print(f"Warning: 맵 폴더를 찾을 수 없습니다: {map_dir}")
-        return {}
-    
-    subdirs = sorted([d for d in os.listdir(map_dir) if os.path.isdir(os.path.join(map_dir, d))])
-    if not subdirs:
-        print(f"Warning: {location} 안에 버전 폴더가 없습니다.")
-        return {}
-    
-    target_version = subdirs[-1] 
-    gpkg_path = os.path.join(map_dir, target_version, "map.gpkg")
-    
-    if not os.path.exists(gpkg_path):
+    try:
+        # NuPlan Map DB 초기화
+        maps_db = GPKGMapsDB(map_root=maps_root, map_version="nuplan-maps-v1.0")
+        map_api = NuPlanMapWrapper(maps_db, location)
+    except Exception as e:
+        print(f"Error initializing NuPlan Map API for {location}: {e}")
         return {}
 
     map_elements = {cls: [] for cls in NUPLAN_TO_MAPTR.keys()}
@@ -62,8 +55,9 @@ def get_map_vectors_from_city(maps_root, map_version, location):
     for class_name, table_names in NUPLAN_TO_MAPTR.items():
         for table_name in table_names:
             try:
-                gdf = gpd.read_file(gpkg_path, layer=table_name)
-                if gdf.empty: continue
+                # API를 통해 레이어 로드 (GeoDataFrame 반환)
+                gdf = map_api.load_vector_layer(table_name)
+                if gdf is None or gdf.empty: continue
                 
                 # Project to UTM if EPSG is defined
                 if target_epsg:
