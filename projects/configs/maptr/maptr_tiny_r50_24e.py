@@ -1,35 +1,28 @@
+# projects/configs/maptr/maptr_tiny_r50_navsim_24e_test.py
+# CUDA_VISIBLE_DEVICES=2,3 ./tools/dist_train.sh projects/configs/maptr/maptr_tiny_r50_navsim_24e_test.py 2
+
 _base_ = [
     '../datasets/custom_nus-3d.py',
     '../_base_/default_runtime.py'
 ]
-#
+
 plugin = True
 plugin_dir = 'projects/mmdet3d_plugin/'
 
-# If point cloud range is changed, the models should also change their point
-# cloud range accordingly
-# point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
-point_cloud_range = [-15.0, -30.0, -2.0, 15.0, 30.0, 2.0]
+# Point Cloud Range
+point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
 voxel_size = [0.15, 0.15, 4]
-
-
-
 
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 
-# For nuScenes we usually do 10-class detection
-class_names = [
-    'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
-    'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
-]
-# map has classes: divider, ped_crossing, boundary
-map_classes = ['divider', 'ped_crossing','boundary']
-# fixed_ptsnum_per_line = 20
-# map_classes = ['divider',]
-fixed_ptsnum_per_gt_line = 20 # now only support fixed_pts > 0
+class_names = ['car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
+               'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone']
+map_classes = ['divider', 'ped_crossing', 'boundary']
+
+fixed_ptsnum_per_gt_line = 20
 fixed_ptsnum_per_pred_line = 20
-eval_use_same_gt_sample_num_flag=True
+eval_use_same_gt_sample_num_flag = True
 num_map_classes = len(map_classes)
 
 input_modality = dict(
@@ -43,11 +36,9 @@ _dim_ = 256
 _pos_dim_ = _dim_//2
 _ffn_dim_ = _dim_*2
 _num_levels_ = 1
-# bev_h_ = 50
-# bev_w_ = 50
 bev_h_ = 200
-bev_w_ = 100
-queue_length = 1 # each sequence contains `queue_length` frames.
+bev_w_ = 200
+queue_length = 1 
 
 model = dict(
     type='MapTR',
@@ -77,7 +68,7 @@ model = dict(
         bev_w=bev_w_,
         num_query=900,
         num_vec=50,
-        num_pts_per_vec=fixed_ptsnum_per_pred_line, # one bbox
+        num_pts_per_vec=fixed_ptsnum_per_pred_line,
         num_pts_per_gt_vec=fixed_ptsnum_per_gt_line,
         dir_interval=1,
         query_embed_type='instance_pts',
@@ -92,6 +83,7 @@ model = dict(
         code_weights=[1.0, 1.0, 1.0, 1.0],
         transformer=dict(
             type='MapTRPerceptionTransformer',
+            num_cams=8,
             rotate_prev_bev=True,
             use_shift=True,
             use_can_bus=True,
@@ -112,6 +104,7 @@ model = dict(
                         dict(
                             type='GeometrySptialCrossAttention',
                             pc_range=point_cloud_range,
+                            num_cams=8,
                             attention=dict(
                                 type='GeometryKernelAttention',
                                 embed_dims=_dim_,
@@ -143,15 +136,13 @@ model = dict(
                             embed_dims=_dim_,
                             num_levels=1),
                     ],
-
                     feedforward_channels=_ffn_dim_,
                     ffn_dropout=0.1,
                     operation_order=('self_attn', 'norm', 'cross_attn', 'norm',
                                      'ffn', 'norm')))),
         bbox_coder=dict(
             type='MapTRNMSFreeCoder',
-            # post_center_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
-            post_center_range=[-20, -35, -20, -35, 20, 35, 20, 35],
+            post_center_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
             pc_range=point_cloud_range,
             max_num=50,
             voxel_size=voxel_size,
@@ -170,10 +161,8 @@ model = dict(
             loss_weight=2.0),
         loss_bbox=dict(type='L1Loss', loss_weight=0.0),
         loss_iou=dict(type='GIoULoss', loss_weight=0.0),
-        loss_pts=dict(type='PtsL1Loss', 
-                      loss_weight=5.0),
+        loss_pts=dict(type='PtsL1Loss', loss_weight=5.0),
         loss_dir=dict(type='PtsDirCosLoss', loss_weight=0.005)),
-    # model training and testing settings
     train_cfg=dict(pts=dict(
         grid_size=[512, 512, 1],
         voxel_size=voxel_size,
@@ -183,35 +172,27 @@ model = dict(
             type='MapTRAssigner',
             cls_cost=dict(type='FocalLossCost', weight=2.0),
             reg_cost=dict(type='BBoxL1Cost', weight=0.0, box_format='xywh'),
-            # reg_cost=dict(type='BBox3DL1Cost', weight=0.25),
-            # iou_cost=dict(type='IoUCost', weight=1.0), # Fake cost. This is just to make it compatible with DETR head.
             iou_cost=dict(type='IoUCost', iou_mode='giou', weight=0.0),
-            pts_cost=dict(type='OrderedPtsL1Cost', 
-                      weight=5),
+            pts_cost=dict(type='OrderedPtsL1Cost', weight=5),
             pc_range=point_cloud_range))))
 
-dataset_type = 'CustomNuScenesLocalMapDataset'
-data_root = 'data/nuscenes/'
+dataset_type = 'CustomNavsimLocalMapDataset'
+data_root = 'data/navsim/'
 file_client_args = dict(backend='disk')
 
-
 train_pipeline = [
-    dict(type='LoadMultiViewImageFromFiles', to_float32=True),
+    dict(type='CustomLoadMultiViewImageFromFiles', to_float32=True),
     dict(type='PhotoMetricDistortionMultiViewImage'),
-    dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_attr_label=False),
-    dict(type='ObjectRangeFilter', point_cloud_range=point_cloud_range),
-    dict(type='ObjectNameFilter', classes=class_names),
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
     dict(type='RandomScaleImageMultiViewImage', scales=[0.5]),
     dict(type='PadMultiViewImage', size_divisor=32),
     dict(type='DefaultFormatBundle3D', class_names=class_names),
-    dict(type='CustomCollect3D', keys=['gt_bboxes_3d', 'gt_labels_3d', 'img'])
+    dict(type='CustomCollect3D', keys=['gt_labels_3d', 'img', 'gt_bboxes_3d'])
 ]
 
 test_pipeline = [
-    dict(type='LoadMultiViewImageFromFiles', to_float32=True),
+    dict(type='CustomLoadMultiViewImageFromFiles', to_float32=True),
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
-   
     dict(
         type='MultiScaleFlipAug3D',
         img_scale=(1600, 900),
@@ -229,12 +210,12 @@ test_pipeline = [
 ]
 
 data = dict(
-    samples_per_gpu=4,
+    samples_per_gpu=1, 
     workers_per_gpu=4,
     train=dict(
         type=dataset_type,
         data_root=data_root,
-        ann_file=data_root + 'nuscenes_infos_temporal_train.pkl',
+        ann_file=data_root + 'navsim_map_infos_test.pkl', # Use TEST split for training
         pipeline=train_pipeline,
         classes=class_names,
         modality=input_modality,
@@ -247,30 +228,34 @@ data = dict(
         padding_value=-10000,
         map_classes=map_classes,
         queue_length=queue_length,
-        # we use box_type_3d='LiDAR' in kitti and nuscenes dataset
-        # and box_type_3d='Depth' in sunrgbd and scannet dataset.
-        box_type_3d='LiDAR'),
+        box_type_3d='LiDAR',
+        filter_empty_gt=False,
+        sensor_root='/home/byounggun/MapTR/data/navsim/download'),
     val=dict(type=dataset_type,
              data_root=data_root,
-             ann_file=data_root + 'nuscenes_infos_temporal_val.pkl',
-             map_ann_file=data_root + 'nuscenes_map_anns_val.json',
-             pipeline=test_pipeline,  bev_size=(bev_h_, bev_w_),
+             ann_file=data_root + 'navsim_map_infos_test.pkl', # Use TEST split for val
+             map_ann_file=data_root + 'navsim_map_gts_test.json', # Might not exist, but needed for config structure
+             pipeline=test_pipeline,  
+             bev_size=(bev_h_, bev_w_),
              pc_range=point_cloud_range,
              fixed_ptsnum_per_line=fixed_ptsnum_per_gt_line,
              eval_use_same_gt_sample_num_flag=eval_use_same_gt_sample_num_flag,
              padding_value=-10000,
              map_classes=map_classes,
+             sensor_root='/home/byounggun/MapTR/data/navsim/download',
              classes=class_names, modality=input_modality, samples_per_gpu=1),
     test=dict(type=dataset_type,
               data_root=data_root,
-              ann_file=data_root + 'nuscenes_infos_temporal_val.pkl',
-              map_ann_file=data_root + 'nuscenes_map_anns_val.json',
-              pipeline=test_pipeline, bev_size=(bev_h_, bev_w_),
+              ann_file=data_root + 'navsim_map_infos_test.pkl',
+              map_ann_file=data_root + 'navsim_map_gts_test.json',
+              pipeline=test_pipeline, 
+              bev_size=(bev_h_, bev_w_),
               pc_range=point_cloud_range,
               fixed_ptsnum_per_line=fixed_ptsnum_per_gt_line,
               eval_use_same_gt_sample_num_flag=eval_use_same_gt_sample_num_flag,
               padding_value=-10000,
               map_classes=map_classes,
+              sensor_root='/home/byounggun/MapTR/data/navsim/download',
               classes=class_names, modality=input_modality),
     shuffler_sampler=dict(type='DistributedGroupSampler'),
     nonshuffler_sampler=dict(type='DistributedSampler')
@@ -286,7 +271,6 @@ optimizer = dict(
     weight_decay=0.01)
 
 optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
-# learning policy
 lr_config = dict(
     policy='CosineAnnealing',
     warmup='linear',
@@ -294,12 +278,8 @@ lr_config = dict(
     warmup_ratio=1.0 / 3,
     min_lr_ratio=1e-3)
 total_epochs = 24
-# total_epochs = 50
-# evaluation = dict(interval=1, pipeline=test_pipeline)
 evaluation = dict(interval=2, pipeline=test_pipeline, metric='chamfer')
-
 runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
-
 log_config = dict(
     interval=50,
     hooks=[
