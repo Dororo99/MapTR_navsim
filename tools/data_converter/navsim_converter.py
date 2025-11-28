@@ -6,92 +6,9 @@ import os
 import os.path as osp
 import pickle
 from tqdm import tqdm
-from pyquaternion import Quaternion
 from multiprocessing import Pool
 from functools import partial
 from pathlib import Path
-# python tools/data_converter/navsim_converter.py --data-root data/navsim --out-dir data/navsim
-# [핵심] nuPlan API 사용
-try:
-    from nuplan.database.maps_db.gpkg_mapsdb import GPKGMapsDB
-    from nuplan.database.maps_db.map_api import NuPlanMapWrapper
-    from nuplan.database.maps_db.map_explorer import NuPlanMapExplorer
-except ImportError:
-    print("ERROR: nuplan-devkit이 설치되지 않았습니다.")
-    exit()
-
-# 실제 테이블 이름 매핑
-NUPLAN_TO_MAPTR = {
-    'divider': ['lanes_polygons', 'lane_connectors'],
-    'ped_crossing': ['crosswalks'],
-    'boundary': ['boundaries', 'generic_drivable_areas'], 
-}
-
-# EPSG codes for UTM zones
-LOCATION_TO_EPSG = {
-    'us-ma-boston': 32619,             # UTM Zone 19N
-    'us-nv-las-vegas-strip': 32611,    # UTM Zone 11N
-    'us-pa-pittsburgh-hazelwood': 32617, # UTM Zone 17N
-    'sg-one-north': 32648,             # UTM Zone 48N
-}
-
-def get_map_vectors_from_city(maps_root, map_version, location):
-    """
-    nuplan-devkit API를 사용하여 맵 벡터 데이터를 추출합니다.
-    """
-    print(f"[{location}] 맵 벡터 추출 시작 (API 사용)...")
-    
-    try:
-        # NuPlan Map DB 초기화
-        maps_db = GPKGMapsDB(map_root=maps_root, map_version="nuplan-maps-v1.0")
-        map_api = NuPlanMapWrapper(maps_db, location)
-    except Exception as e:
-        print(f"Error initializing NuPlan Map API for {location}: {e}")
-        return {}
-
-    map_elements = {cls: [] for cls in NUPLAN_TO_MAPTR.keys()}
-    target_epsg = LOCATION_TO_EPSG.get(location)
-
-    for class_name, table_names in NUPLAN_TO_MAPTR.items():
-        for table_name in table_names:
-            try:
-                # API를 통해 레이어 로드 (GeoDataFrame 반환)
-                gdf = map_api.load_vector_layer(table_name)
-                if gdf is None or gdf.empty: continue
-                
-                # Project to UTM if EPSG is defined
-                if target_epsg:
-                    if gdf.crs is None:
-                        gdf.set_crs(epsg=4326, inplace=True) # Assume WGS84 if undefined
-                    gdf = gdf.to_crs(epsg=target_epsg)
-
-                for geom in gdf.geometry:
-                    if geom is None: continue
-
-                    pts_list = []
-                    if geom.geom_type == 'LineString':
-                        pts_list.append(np.array(geom.coords))
-                    elif geom.geom_type == 'Polygon':
-                        pts_list.append(np.array(geom.exterior.coords))
-                    elif geom.geom_type == 'MultiLineString':
-                        for line in geom.geoms:
-                            pts_list.append(np.array(line.coords))
-                    elif geom.geom_type == 'MultiPolygon':
-                        for poly in geom.geoms:
-                            pts_list.append(np.array(poly.exterior.coords))
-                    
-                    for pts in pts_list:
-                        if pts.shape[1] == 2:
-                            pts = np.hstack([pts, np.zeros((pts.shape[0], 1))])
-                        map_elements[class_name].append(pts)
-
-            except Exception as e:
-                print(f"  - Error reading {table_name} in {location}: {e}")
-                continue
-    
-    cnt_str = ", ".join([f"{k}:{len(v)}" for k,v in map_elements.items()])
-    print(f"[{location}] 추출 완료. ({cnt_str})")
-    return map_elements
 
 def process_pkl_file(pkl_path, data_root, split):
     try:
@@ -222,18 +139,8 @@ def create_navsim_infos(data_root, out_dir, split, nproc):
     if len(all_samples) == 0:
         return
 
-    unique_locations = list(set([s['map_location'] for s in all_samples if s['map_location']]))
-    print(f"Maps to extract: {unique_locations}")
-
-    id2map = {}
-    maps_root = os.environ.get("NUPLAN_MAPS_ROOT")
-    
-    for location in unique_locations:
-        map_vectors = get_map_vectors_from_city(maps_root, None, location)
-        if map_vectors:
-            id2map[location] = map_vectors
-
-    infos = dict(samples=all_samples, id2map=id2map)
+    # NuScenes 스타일: 맵 데이터 없이 샘플 정보만 저장
+    infos = dict(samples=all_samples)
     out_file = osp.join(out_dir, f"navsim_map_infos_{split}.pkl")
     mmcv.dump(infos, out_file)
     print(f"Saved to {out_file}")
@@ -244,9 +151,6 @@ if __name__ == '__main__':
     parser.add_argument('--out-dir', type=str, required=True)
     parser.add_argument('--nproc', type=int, default=16)
     args = parser.parse_args()
-
-    if os.environ.get("NUPLAN_MAPS_ROOT") is None:
-         os.environ['NUPLAN_MAPS_ROOT'] = osp.join(args.data_root, 'download', 'maps')
     
     os.makedirs(args.out_dir, exist_ok=True)
 

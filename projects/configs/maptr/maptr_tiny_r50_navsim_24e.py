@@ -1,25 +1,24 @@
-# projects/configs/maptr/maptr_tiny_r50_navsim_24e.py
-# ./tools/dist_train.sh projects/configs/maptr/maptr_tiny_r50_navsim_24e.py 1
+# projects/configs/maptr/maptr_tiny_r50_navsim_24e_test.py
+# CUDA_VISIBLE_DEVICES=2,3 ./tools/dist_train.sh projects/configs/maptr/maptr_tiny_r50_navsim_24e_test.py 2
 
 _base_ = [
-    '../datasets/custom_nus-3d.py', # 기본 뼈대는 nuScenes 설정을 상속
+    '../datasets/custom_nus-3d.py',
     '../_base_/default_runtime.py'
 ]
 
 plugin = True
 plugin_dir = 'projects/mmdet3d_plugin/'
 
-# Point Cloud Range (Navsim 범위에 맞게 조정 가능, 우선 nuScenes와 동일하게 설정)
+# Point Cloud Range
 point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
 voxel_size = [0.15, 0.15, 4]
 
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 
-# Navsim 클래스 정의
 class_names = ['car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
                'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone']
-map_classes = ['divider', 'ped_crossing', 'boundary'] # 컨버터와 일치해야 함
+map_classes = ['divider', 'ped_crossing', 'boundary']
 
 fixed_ptsnum_per_gt_line = 20
 fixed_ptsnum_per_pred_line = 20
@@ -38,14 +37,14 @@ _pos_dim_ = _dim_//2
 _ffn_dim_ = _dim_*2
 _num_levels_ = 1
 bev_h_ = 200
-bev_w_ = 200 # BEV 그리드 크기
+bev_w_ = 200
 queue_length = 1 
 
 model = dict(
     type='MapTR',
     use_grid_mask=True,
     video_test_mode=False,
-    pretrained=dict(img='ckpts/resnet50-19c8e357.pth'), # ImageNet Pretrained Weights 필요
+    pretrained=dict(img='ckpts/resnet50-19c8e357.pth'),
     img_backbone=dict(
         type='ResNet',
         depth=50,
@@ -84,6 +83,7 @@ model = dict(
         code_weights=[1.0, 1.0, 1.0, 1.0],
         transformer=dict(
             type='MapTRPerceptionTransformer',
+            num_cams=8,
             rotate_prev_bev=True,
             use_shift=True,
             use_can_bus=True,
@@ -104,6 +104,7 @@ model = dict(
                         dict(
                             type='GeometrySptialCrossAttention',
                             pc_range=point_cloud_range,
+                            num_cams=8,
                             attention=dict(
                                 type='GeometryKernelAttention',
                                 embed_dims=_dim_,
@@ -175,7 +176,6 @@ model = dict(
             pts_cost=dict(type='OrderedPtsL1Cost', weight=5),
             pc_range=point_cloud_range))))
 
-# [핵심 변경] Navsim 데이터셋 사용
 dataset_type = 'CustomNavsimLocalMapDataset'
 data_root = 'data/navsim/'
 file_client_args = dict(backend='disk')
@@ -183,15 +183,11 @@ file_client_args = dict(backend='disk')
 train_pipeline = [
     dict(type='CustomLoadMultiViewImageFromFiles', to_float32=True),
     dict(type='PhotoMetricDistortionMultiViewImage'),
-    # Navsim에는 3D Box GT가 없을 수 있으므로, box 관련 로더는 제거하거나 더미로 대체 필요할 수 있음
-    # 우선 MapTR 코드가 3D bbox를 필수로 요구하는지 확인 필요. 
-    # MapTR은 Map만 학습할 때도 3D bbox 로더를 켜두는 경우가 있으나(빈 값으로), 
-    # 여기서는 안전하게 필수 요소만 남깁니다.
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
     dict(type='RandomScaleImageMultiViewImage', scales=[0.5]),
     dict(type='PadMultiViewImage', size_divisor=32),
     dict(type='DefaultFormatBundle3D', class_names=class_names),
-    dict(type='CustomCollect3D', keys=['gt_labels_3d', 'img', 'gt_bboxes_3d']) # bboxes_3d는 맵 벡터
+    dict(type='CustomCollect3D', keys=['gt_labels_3d', 'img', 'gt_bboxes_3d'])
 ]
 
 test_pipeline = [
@@ -199,7 +195,7 @@ test_pipeline = [
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
     dict(
         type='MultiScaleFlipAug3D',
-        img_scale=(1600, 900), # Navsim 이미지 크기에 맞춰 수정 필요할 수 있음
+        img_scale=(1600, 900),
         pts_scale_ratio=1,
         flip=False,
         transforms=[
@@ -214,12 +210,12 @@ test_pipeline = [
 ]
 
 data = dict(
-    samples_per_gpu=2, 
+    samples_per_gpu=1, 
     workers_per_gpu=4,
     train=dict(
         type=dataset_type,
         data_root=data_root,
-        ann_file=data_root + 'navsim_map_infos_trainval.pkl', # 생성된 학습용 pkl
+        ann_file=data_root + 'navsim_map_infos_test.pkl', # Use TEST split for training
         pipeline=train_pipeline,
         classes=class_names,
         modality=input_modality,
@@ -232,11 +228,13 @@ data = dict(
         padding_value=-10000,
         map_classes=map_classes,
         queue_length=queue_length,
-        box_type_3d='LiDAR'),
+        box_type_3d='LiDAR',
+        filter_empty_gt=False,
+        sensor_root='/home/byounggun/MapTR/data/navsim/download'),
     val=dict(type=dataset_type,
              data_root=data_root,
-             ann_file=data_root + 'navsim_map_infos_mini.pkl', # 검증용 pkl
-             map_ann_file=data_root + 'navsim_map_gts_mini.json', # (선택) 평가용 GT
+             ann_file=data_root + 'navsim_map_infos_test.pkl', # Use TEST split for val
+             map_ann_file=data_root + 'navsim_map_gts_test.json', # Might not exist, but needed for config structure
              pipeline=test_pipeline,  
              bev_size=(bev_h_, bev_w_),
              pc_range=point_cloud_range,
@@ -244,10 +242,11 @@ data = dict(
              eval_use_same_gt_sample_num_flag=eval_use_same_gt_sample_num_flag,
              padding_value=-10000,
              map_classes=map_classes,
+             sensor_root='/home/byounggun/MapTR/data/navsim/download',
              classes=class_names, modality=input_modality, samples_per_gpu=1),
     test=dict(type=dataset_type,
               data_root=data_root,
-              ann_file=data_root + 'navsim_map_infos_mini.pkl', # 테스트용
+              ann_file=data_root + 'navsim_map_infos_test.pkl',
               map_ann_file=data_root + 'navsim_map_gts_test.json',
               pipeline=test_pipeline, 
               bev_size=(bev_h_, bev_w_),
@@ -256,6 +255,7 @@ data = dict(
               eval_use_same_gt_sample_num_flag=eval_use_same_gt_sample_num_flag,
               padding_value=-10000,
               map_classes=map_classes,
+              sensor_root='/home/byounggun/MapTR/data/navsim/download',
               classes=class_names, modality=input_modality),
     shuffler_sampler=dict(type='DistributedGroupSampler'),
     nonshuffler_sampler=dict(type='DistributedSampler')

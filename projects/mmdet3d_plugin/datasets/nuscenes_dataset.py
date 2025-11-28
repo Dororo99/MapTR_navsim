@@ -82,12 +82,14 @@ class CustomNuScenesDataset(NuScenesDataset):
             metas_map[i] = each['img_metas'].data
             if i == 0:
                 metas_map[i]['prev_bev'] = False
+                metas_map[i]['prev_bev_exists'] = False
                 prev_pos = copy.deepcopy(metas_map[i]['can_bus'][:3])
                 prev_angle = copy.deepcopy(metas_map[i]['can_bus'][-1])
                 metas_map[i]['can_bus'][:3] = 0
                 metas_map[i]['can_bus'][-1] = 0
             else:
                 metas_map[i]['prev_bev'] = True
+                metas_map[i]['prev_bev_exists'] = True
                 tmp_pos = copy.deepcopy(metas_map[i]['can_bus'][:3])
                 tmp_angle = copy.deepcopy(metas_map[i]['can_bus'][-1])
                 metas_map[i]['can_bus'][:3] -= prev_pos

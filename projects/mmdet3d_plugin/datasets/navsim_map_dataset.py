@@ -51,6 +51,26 @@ class LiDARInstanceLines(object):
         return instance_points_tensor
 
     @property
+    def bbox(self):
+        """
+        return torch.Tensor([N,4]), in xmin, ymin, xmax, ymax form
+        """
+        assert len(self.instance_list) != 0
+        instance_bbox_list = []
+        for instance in self.instance_list:
+            # bounds is bbox: [xmin, ymin, xmax, ymax]
+            instance_bbox_list.append(instance.bounds)
+        instance_bbox_array = np.array(instance_bbox_list)
+        instance_bbox_tensor = to_tensor(instance_bbox_array)
+        instance_bbox_tensor = instance_bbox_tensor.to(
+                            dtype=torch.float32)
+        instance_bbox_tensor[:,0] = torch.clamp(instance_bbox_tensor[:,0], min=-self.max_x,max=self.max_x)
+        instance_bbox_tensor[:,1] = torch.clamp(instance_bbox_tensor[:,1], min=-self.max_y,max=self.max_y)
+        instance_bbox_tensor[:,2] = torch.clamp(instance_bbox_tensor[:,2], min=-self.max_x,max=self.max_x)
+        instance_bbox_tensor[:,3] = torch.clamp(instance_bbox_tensor[:,3], min=-self.max_y,max=self.max_y)
+        return instance_bbox_tensor
+
+    @property
     def shift_fixed_num_sampled_points(self):
         fixed_num_sampled_points = self.fixed_num_sampled_points
         if len(fixed_num_sampled_points) == 0:
@@ -533,4 +553,6 @@ class CustomNavsimLocalMapDataset(CustomNuScenesDataset):
                 (example is None or ~(example['gt_labels_3d']._data != -1).any()):
             return None
         example = self.vectormap_pipeline(example, input_dict)
-        return example
+        
+        # MapTR expects a queue dimension (even if length is 1)
+        return self.union2one([example])
