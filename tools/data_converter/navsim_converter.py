@@ -10,6 +10,8 @@ from multiprocessing import Pool
 from functools import partial
 from pathlib import Path
 
+# python navsim_converter.py --data-root /home/byounggun/MapTR/data/navsim --out-dir /home/byounggun/MapTR/data/navsim
+
 def process_pkl_file(pkl_path, data_root, split):
     try:
         with open(pkl_path, 'rb') as f:
@@ -59,6 +61,9 @@ def process_pkl_file(pkl_path, data_root, split):
                         if split == 'test':
                              # test_sensor_blobs/test/...
                              abs_path = os.path.join(data_root, 'download', 'test_sensor_blobs', split, rel_path)
+                        elif split == 'trainval':
+                             # trainval_sensor_blobs/trainval/...
+                             abs_path = os.path.join(data_root, 'download', 'trainval_sensor_blobs', split, rel_path)
                         else:
                              abs_path = os.path.join(data_root, 'sensor_blobs', split, rel_path)
                         
@@ -113,6 +118,22 @@ def create_navsim_infos(data_root, out_dir, split, nproc):
     
     if split == 'test':
         logs_root = Path(data_root) / "download" / "test_navsim_logs" / split
+    elif split == 'trainval':
+        # Try multiple locations for trainval
+        candidates = [
+            Path(data_root) / "download" / "trainval_navsim_logs" / split,
+            Path(data_root) / "download" / "mini_navsim_logs" / split,
+            Path(data_root) / "navsim_logs" / split
+        ]
+        logs_root = None
+        for cand in candidates:
+            if cand.exists():
+                logs_root = cand
+                break
+        
+        if logs_root is None:
+             # Default to one of them for error message
+             logs_root = candidates[0]
     else:
         logs_root = Path(data_root) / "navsim_logs" / split
     if not logs_root.exists():
@@ -154,6 +175,6 @@ if __name__ == '__main__':
     
     os.makedirs(args.out_dir, exist_ok=True)
 
-    # for split in ['mini', 'trainval', 'test']:
-    for split in ['test']:
+    for split in ['mini', 'trainval', 'test']:
+    # for split in ['test']:
         create_navsim_infos(args.data_root, args.out_dir, split, args.nproc)
