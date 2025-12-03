@@ -9,6 +9,7 @@ from mmdet3d.datasets import NuScenesDataset
 from mmcv.parallel import DataContainer as DC
 from shapely.geometry import LineString, box, MultiLineString, MultiPolygon
 from shapely import affinity
+import shapely.ops as ops
 from mmdet.datasets.pipelines import to_tensor
 from pyquaternion import Quaternion
 from nuscenes.eval.common.utils import quaternion_yaw
@@ -306,13 +307,29 @@ class LiDARInstanceLines(object):
 
 
 class VectorizedLocalMap(object):
-    """VAD의 로직을 MapTR용으로 수정"""
+    """NuPlan 맵 레이어를 사용한 Map Vector 생성
+    
+    NuScenes 스타일 매핑:
+    - divider (0): baseline_paths (차선 중심선) - 차선 구분용
+    - ped_crossing (1): crosswalks 레이어
+    - boundary (2): road_segments union 후 외곽선 (도로 가장자리만)
+    """
+    
+    CLASS2LABEL = {
+        'divider': 0,
+        'baseline_paths': 0,
+        'ped_crossing': 1,
+        'crosswalks': 1,
+        'boundary': 2,
+        'road_segments': 2,
+    }
+    
     def __init__(self, dataroot, patch_size, map_classes, sample_dist=1, num_samples=250, padding=False, fixed_ptsnum_per_line=-1, padding_value=-10000, map_root=None):
         self.data_root = dataroot
         if map_root:
             self.map_root = map_root
         else:
-            self.map_root = os.path.join(dataroot, 'maps') # maps 폴더 경로 추론
+            self.map_root = os.path.join(dataroot, 'maps')
         self.map_version = "nuplan-maps-v1.0"
         self.vec_classes = map_classes
         self.patch_size = patch_size
@@ -322,7 +339,7 @@ class VectorizedLocalMap(object):
         self.padding = padding
         self.padding_value = padding_value
 
-        # NuPlan Map DB 초기화 (메모리에 로드)
+        # NuPlan Map DB 초기화
         self.maps_db = GPKGMapsDB(map_root=self.map_root, map_version=self.map_version)
         self.map_apis = {}
         self.map_explorers = {}
@@ -335,37 +352,45 @@ class VectorizedLocalMap(object):
             except Exception as e:
                 print(f"Warning: Failed to load map {loc}: {e}")
 
-        # MapTR 클래스 <-> NuPlan 레이어 매핑
-        self.layer_mapping = {
-            'divider': ['lane_dividers'], 
-            'ped_crossing': ['crosswalks'],
-            'boundary': ['road_boundaries'],
-            # 필요시 추가: 'centerline': ['baseline_paths']
-        }
+        # 레이어 설정
+        self.divider_layer = 'baseline_paths'  # 차선 중심선
+        self.ped_crossing_layer = 'crosswalks'  # 횡단보도
+        self.boundary_layer = 'road_segments'  # 도로 세그먼트 (전체 도로 영역)
 
     def gen_vectorized_samples(self, location, lidar2global_translation, lidar2global_rotation):
         map_pose = lidar2global_translation[:2]
         rotation = Quaternion(lidar2global_rotation)
         patch_angle = rotation.yaw_pitch_roll[0] / np.pi * 180
         
-        # Patch Box 정의 (x, y, h, w) - VAD 코드 참고
         patch_box = (map_pose[0], map_pose[1], self.patch_size[0], self.patch_size[1])
         
         vectors = []
         for vec_class in self.vec_classes:
-            layers = self.layer_mapping.get(vec_class, [])
-            for layer_name in layers:
-                # 해당 레이어의 기하 정보 쿼리 (VAD 로직 사용)
-                geoms = self.get_map_geom(patch_box, patch_angle, layer_name, location)
-                for geom in geoms:
-                    vectors.append((geom, self.vec_classes.index(vec_class)))
+            if vec_class == 'divider':
+                # baseline_paths (차선 중심선) 사용
+                divider_lines = self.get_divider_lines(patch_box, patch_angle, location)
+                for inst in divider_lines:
+                    vectors.append((inst, 0))
+                        
+            elif vec_class == 'ped_crossing':
+                # crosswalks 레이어에서 polygon → 외곽선 추출
+                ped_lines = self.get_ped_crossing_lines(patch_box, patch_angle, location)
+                for inst in ped_lines:
+                    vectors.append((inst, 1))
+                    
+            elif vec_class == 'boundary':
+                # road_segments union 후 외곽선 추출 (도로 가장자리만)
+                boundary_lines = self.get_road_boundary_lines(patch_box, patch_angle, location)
+                for inst in boundary_lines:
+                    vectors.append((inst, 2))
 
         # LiDARInstanceLines 객체로 변환
         gt_instance = []
         gt_labels = []
         for instance, label in vectors:
-            gt_instance.append(instance)
-            gt_labels.append(label)
+            if instance is not None and not instance.is_empty and label != -1:
+                gt_instance.append(instance)
+                gt_labels.append(label)
 
         gt_instance_lines = LiDARInstanceLines(
             gt_instance, self.sample_dist, self.num_samples, self.padding, 
@@ -374,49 +399,381 @@ class VectorizedLocalMap(object):
 
         return dict(gt_vecs_pts_loc=gt_instance_lines, gt_vecs_label=gt_labels)
 
-    def get_map_geom(self, patch_box, patch_angle, layer_name, location):
-        if location not in self.map_apis: return []
+    def get_divider_lines(self, patch_box, patch_angle, location):
+        """baseline_paths에서 차선 중심선 추출"""
+        if location not in self.map_apis:
+            return []
         
         map_api = self.map_apis[location]
         patch_x, patch_y = patch_box[0], patch_box[1]
-        
-        # Patch 좌표 계산
         patch = map_api.get_patch_coord(patch_box, patch_angle)
         
-        # 해당 레이어 로드 (GeoDataFrame)
+        line_list = []
         try:
-            records = map_api.load_vector_layer(layer_name)
+            records = map_api.load_vector_layer(self.divider_layer)
+            for geometry in records['geometry']:
+                if geometry is None or geometry.is_empty:
+                    continue
+                new_line = geometry.intersection(patch)
+                if new_line.is_empty:
+                    continue
+                new_line = affinity.rotate(new_line, -patch_angle, origin=(patch_x, patch_y), use_radians=False)
+                new_line = affinity.affine_transform(new_line, [1.0, 0.0, 0.0, 1.0, -patch_x, -patch_y])
+                
+                if new_line.geom_type == 'MultiLineString':
+                    for single_line in new_line.geoms:
+                        if single_line.length > 1.0:
+                            line_list.append(single_line)
+                elif new_line.geom_type == 'LineString':
+                    if new_line.length > 1.0:
+                        line_list.append(new_line)
+                elif new_line.geom_type == 'GeometryCollection':
+                    for g in new_line.geoms:
+                        if g.geom_type == 'LineString' and g.length > 1.0:
+                            line_list.append(g)
+        except Exception as e:
+            pass
+        
+        return line_list
+
+    def get_ped_crossing_lines(self, patch_box, patch_angle, location):
+        """crosswalks에서 횡단보도 외곽선 추출"""
+        if location not in self.map_apis:
+            return []
+        
+        map_api = self.map_apis[location]
+        patch_x, patch_y = patch_box[0], patch_box[1]
+        patch = map_api.get_patch_coord(patch_box, patch_angle)
+        
+        polygon_list = []
+        try:
+            records = map_api.load_vector_layer(self.ped_crossing_layer)
+            for geometry in records['geometry']:
+                if geometry is None or geometry.is_empty:
+                    continue
+                new_polygon = geometry.intersection(patch)
+                if new_polygon.is_empty:
+                    continue
+                new_polygon = affinity.rotate(new_polygon, -patch_angle, origin=(patch_x, patch_y), use_radians=False)
+                new_polygon = affinity.affine_transform(new_polygon, [1.0, 0.0, 0.0, 1.0, -patch_x, -patch_y])
+                
+                if new_polygon.geom_type == 'Polygon':
+                    polygon_list.append(new_polygon)
+                elif new_polygon.geom_type == 'MultiPolygon':
+                    polygon_list.extend(list(new_polygon.geoms))
+        except Exception as e:
+            pass
+        
+        if not polygon_list:
+            return []
+        
+        # 각 polygon의 exterior를 LineString으로 변환
+        lines = []
+        max_x = self.patch_size[1] / 2
+        max_y = self.patch_size[0] / 2
+        local_patch = box(-max_x + 0.2, -max_y + 0.2, max_x - 0.2, max_y - 0.2)
+        
+        for poly in polygon_list:
+            ext = LineString(poly.exterior.coords)
+            clipped = ext.intersection(local_patch)
+            if clipped.is_empty:
+                continue
+            if clipped.geom_type == 'MultiLineString':
+                clipped = ops.linemerge(clipped)
+            if clipped.geom_type == 'LineString' and clipped.length > 1.0:
+                lines.append(clipped)
+            elif clipped.geom_type == 'MultiLineString':
+                for line in clipped.geoms:
+                    if line.length > 1.0:
+                        lines.append(line)
+        
+        return lines
+
+    def get_road_boundary_lines(self, patch_box, patch_angle, location):
+        """road_segments를 union해서 도로 외곽선만 추출"""
+        if location not in self.map_apis:
+            return []
+        
+        map_api = self.map_apis[location]
+        patch_x, patch_y = patch_box[0], patch_box[1]
+        patch = map_api.get_patch_coord(patch_box, patch_angle)
+        
+        polygon_list = []
+        try:
+            records = map_api.load_vector_layer(self.boundary_layer)
+            for geometry in records['geometry']:
+                if geometry is None or geometry.is_empty:
+                    continue
+                new_polygon = geometry.intersection(patch)
+                if new_polygon.is_empty:
+                    continue
+                new_polygon = affinity.rotate(new_polygon, -patch_angle, origin=(patch_x, patch_y), use_radians=False)
+                new_polygon = affinity.affine_transform(new_polygon, [1.0, 0.0, 0.0, 1.0, -patch_x, -patch_y])
+                
+                if new_polygon.geom_type == 'Polygon':
+                    polygon_list.append(new_polygon)
+                elif new_polygon.geom_type == 'MultiPolygon':
+                    polygon_list.extend(list(new_polygon.geoms))
+        except Exception as e:
+            pass
+        
+        if not polygon_list:
+            return []
+        
+        # 모든 road_segments를 union → 전체 도로 영역
+        try:
+            union_road = ops.unary_union(polygon_list)
         except:
             return []
+        
+        if union_road.is_empty:
+            return []
+        
+        # 외곽선만 추출
+        max_x = self.patch_size[1] / 2
+        max_y = self.patch_size[0] / 2
+        local_patch = box(-max_x + 0.2, -max_y + 0.2, max_x - 0.2, max_y - 0.2)
+        
+        if union_road.geom_type == 'Polygon':
+            union_road = MultiPolygon([union_road])
+        
+        lines = []
+        for poly in union_road.geoms:
+            # 외곽선 (도로 가장자리)
+            ext = LineString(poly.exterior.coords)
+            clipped = ext.intersection(local_patch)
+            if not clipped.is_empty:
+                if clipped.geom_type == 'MultiLineString':
+                    clipped = ops.linemerge(clipped)
+                if clipped.geom_type == 'LineString' and clipped.length > 1.0:
+                    lines.append(clipped)
+                elif clipped.geom_type == 'MultiLineString':
+                    for line in clipped.geoms:
+                        if line.length > 1.0:
+                            lines.append(line)
+            
+            # 내부 홀 (섬 등)
+            for interior in poly.interiors:
+                inter_line = LineString(interior.coords)
+                clipped = inter_line.intersection(local_patch)
+                if not clipped.is_empty:
+                    if clipped.geom_type == 'MultiLineString':
+                        clipped = ops.linemerge(clipped)
+                    if clipped.geom_type == 'LineString' and clipped.length > 1.0:
+                        lines.append(clipped)
+                    elif clipped.geom_type == 'MultiLineString':
+                        for line in clipped.geoms:
+                            if line.length > 1.0:
+                                lines.append(line)
+        
+        return lines
 
-        geom_list = []
-        # R-Tree나 인덱스 없이 전체 순회는 느리지만 VAD 방식 따름 (최적화 가능)
-        for geometry in records['geometry']:
-            if geometry is None or geometry.is_empty: continue
-            
-            # 1. Intersection Check
-            if not geometry.intersects(patch): continue
-            new_geom = geometry.intersection(patch)
-            if new_geom.is_empty: continue
-            
-            # 2. Transform to Local Coordinates (Global -> Ego)
-            # Rotate (-patch_angle) & Translate (-patch_x, -patch_y)
-            new_geom = affinity.rotate(new_geom, -patch_angle, origin=(patch_x, patch_y), use_radians=False)
-            new_geom = affinity.affine_transform(new_geom, [1.0, 0.0, 0.0, 1.0, -patch_x, -patch_y])
-            
-            # 3. Convert to LineString (MapTR은 선만 처리함)
-            if new_geom.geom_type == 'Polygon':
-                geom_list.append(new_geom.exterior) # 폴리곤은 외곽선만
-            elif new_geom.geom_type == 'MultiPolygon':
-                for poly in new_geom.geoms:
-                    geom_list.append(poly.exterior)
-            elif new_geom.geom_type == 'MultiLineString':
-                for line in new_geom.geoms:
-                    geom_list.append(line)
-            elif new_geom.geom_type == 'LineString':
-                geom_list.append(new_geom)
+    # 아래 메서드들은 더 이상 사용되지 않음 - 호환성을 위해 유지
+    def get_map_geom(self, patch_box, patch_angle, layer_names, location, geom_type='line'):
+        """레이어에서 기하 정보 추출 (Legacy)"""
+        map_geom = []
+        for layer_name in layer_names:
+            if geom_type == 'line':
+                geoms = self.get_divider_line(patch_box, patch_angle, layer_name, location)
+            else:  # polygon
+                geoms = self.get_polygon(patch_box, patch_angle, layer_name, location)
+            map_geom.append((layer_name, geoms))
+        return map_geom
+
+    def get_divider_line(self, patch_box, patch_angle, layer_name, location):
+        """Line 레이어 추출 (Legacy)"""
+        if location not in self.map_apis:
+            return []
+        
+        map_api = self.map_apis[location]
+        patch_x, patch_y = patch_box[0], patch_box[1]
+        patch = map_api.get_patch_coord(patch_box, patch_angle)
+        
+        line_list = []
+        try:
+            records = map_api.load_vector_layer(layer_name)
+            for geometry in records['geometry']:
+                if geometry is None or geometry.is_empty:
+                    continue
+                new_line = geometry.intersection(patch)
+                if new_line.is_empty:
+                    continue
+                new_line = affinity.rotate(new_line, -patch_angle, origin=(patch_x, patch_y), use_radians=False)
+                new_line = affinity.affine_transform(new_line, [1.0, 0.0, 0.0, 1.0, -patch_x, -patch_y])
                 
-        return geom_list
+                if new_line.geom_type == 'MultiLineString':
+                    line_list.extend(list(new_line.geoms))
+                elif new_line.geom_type == 'LineString':
+                    line_list.append(new_line)
+                elif new_line.geom_type == 'GeometryCollection':
+                    for g in new_line.geoms:
+                        if g.geom_type == 'LineString':
+                            line_list.append(g)
+        except Exception as e:
+            pass
+        
+        return line_list
+
+    def get_polygon(self, patch_box, patch_angle, layer_name, location):
+        """Polygon 레이어 (crosswalks, lanes_polygons) 추출"""
+        if location not in self.map_apis:
+            return []
+        
+        map_api = self.map_apis[location]
+        patch_x, patch_y = patch_box[0], patch_box[1]
+        patch = map_api.get_patch_coord(patch_box, patch_angle)
+        
+        polygon_list = []
+        try:
+            records = map_api.load_vector_layer(layer_name)
+            for geometry in records['geometry']:
+                if geometry is None or geometry.is_empty:
+                    continue
+                new_polygon = geometry.intersection(patch)
+                if new_polygon.is_empty:
+                    continue
+                new_polygon = affinity.rotate(new_polygon, -patch_angle, origin=(patch_x, patch_y), use_radians=False)
+                new_polygon = affinity.affine_transform(new_polygon, [1.0, 0.0, 0.0, 1.0, -patch_x, -patch_y])
+                
+                if new_polygon.geom_type == 'Polygon':
+                    new_polygon = MultiPolygon([new_polygon])
+                polygon_list.append(new_polygon)
+        except Exception as e:
+            pass
+        
+        return polygon_list
+
+    def _one_type_line_geom_to_instances(self, line_geom):
+        """Line geometry를 LineString 인스턴스 리스트로 변환"""
+        line_instances = []
+        for line in line_geom:
+            if line is None or line.is_empty:
+                continue
+            if line.geom_type == 'MultiLineString':
+                for single_line in line.geoms:
+                    if single_line.length > 1.0:  # 최소 길이 필터
+                        line_instances.append(single_line)
+            elif line.geom_type == 'LineString':
+                if line.length > 1.0:
+                    line_instances.append(line)
+        return line_instances
+
+    def line_geoms_to_instances(self, line_geom):
+        """Line geometry dict를 인스턴스 dict로 변환"""
+        line_instances_dict = {}
+        for line_type, lines in line_geom:
+            instances = self._one_type_line_geom_to_instances(lines)
+            line_instances_dict[line_type] = instances
+        return line_instances_dict
+
+    def ped_poly_geoms_to_instances(self, ped_geom):
+        """Pedestrian crossing polygon → 외곽선 LineString 추출"""
+        if not ped_geom or len(ped_geom) == 0:
+            return []
+        
+        ped_polygons = ped_geom[0][1] if len(ped_geom) > 0 else []
+        if len(ped_polygons) == 0:
+            return []
+        
+        # Union all polygons
+        all_polys = []
+        for mp in ped_polygons:
+            if mp is None or mp.is_empty:
+                continue
+            if mp.geom_type == 'MultiPolygon':
+                all_polys.extend(list(mp.geoms))
+            elif mp.geom_type == 'Polygon':
+                all_polys.append(mp)
+        
+        if not all_polys:
+            return []
+        
+        try:
+            union_segments = ops.unary_union(all_polys)
+        except:
+            return []
+        
+        max_x = self.patch_size[1] / 2
+        max_y = self.patch_size[0] / 2
+        local_patch = box(-max_x - 0.2, -max_y - 0.2, max_x + 0.2, max_y + 0.2)
+        
+        if union_segments.geom_type != 'MultiPolygon':
+            union_segments = MultiPolygon([union_segments])
+        
+        results = []
+        for poly in union_segments.geoms:
+            ext = poly.exterior
+            if ext.is_ccw:
+                ext = LineString(list(ext.coords)[::-1])
+            lines = ext.intersection(local_patch)
+            if isinstance(lines, MultiLineString):
+                lines = ops.linemerge(lines)
+            results.append(lines)
+        
+        return self._one_type_line_geom_to_instances(results)
+
+    def poly_geoms_to_instances(self, polygon_geom):
+        """Lane polygon들을 union하고 외곽선(contour) 추출 → boundary"""
+        if not polygon_geom:
+            return []
+        
+        # Collect all polygons
+        all_polys = []
+        for layer_name, geoms in polygon_geom:
+            for mp in geoms:
+                if mp is None or mp.is_empty:
+                    continue
+                if mp.geom_type == 'MultiPolygon':
+                    all_polys.extend(list(mp.geoms))
+                elif mp.geom_type == 'Polygon':
+                    all_polys.append(mp)
+        
+        if not all_polys:
+            return []
+        
+        # Union all lane polygons → 전체 도로 영역
+        try:
+            union_segments = ops.unary_union(all_polys)
+        except:
+            return []
+        
+        if union_segments.is_empty:
+            return []
+        
+        max_x = self.patch_size[1] / 2
+        max_y = self.patch_size[0] / 2
+        local_patch = box(-max_x + 0.2, -max_y + 0.2, max_x - 0.2, max_y - 0.2)
+        
+        if union_segments.geom_type != 'MultiPolygon':
+            union_segments = MultiPolygon([union_segments])
+        
+        exteriors = []
+        interiors = []
+        for poly in union_segments.geoms:
+            exteriors.append(poly.exterior)
+            for inter in poly.interiors:
+                interiors.append(inter)
+        
+        results = []
+        # Exterior boundaries (도로 외곽)
+        for ext in exteriors:
+            if ext.is_ccw:
+                ext = LineString(list(ext.coords)[::-1])
+            lines = ext.intersection(local_patch)
+            if isinstance(lines, MultiLineString):
+                lines = ops.linemerge(lines)
+            results.append(lines)
+        
+        # Interior boundaries (도로 내 홀, 예: 섬)
+        for inter in interiors:
+            if not inter.is_ccw:
+                inter = LineString(list(inter.coords)[::-1])
+            lines = inter.intersection(local_patch)
+            if isinstance(lines, MultiLineString):
+                lines = ops.linemerge(lines)
+            results.append(lines)
+        
+        return self._one_type_line_geom_to_instances(results)
 
 @DATASETS.register_module()
 class CustomNavsimLocalMapDataset(CustomNuScenesDataset):

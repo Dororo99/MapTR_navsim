@@ -211,11 +211,12 @@ test_pipeline = [
 
 data = dict(
     samples_per_gpu=4,  
-    workers_per_gpu=4,  # Keep low to avoid memory issues with VectorizedLocalMap
+    workers_per_gpu=8,  # Keep low to avoid memory issues with VectorizedLocalMap
     train=dict(
         type=dataset_type,
         data_root=data_root,
-        ann_file=data_root + 'navsim_map_infos_trainval_filtered.pkl',  # Back to runtime generation
+        # ann_file=data_root + 'navsim_map_infos_trainval_filtered.pkl',  # Back to runtime generation
+        ann_file=data_root + 'navsim_map_infos_test.pkl',
         pipeline=train_pipeline,
         classes=class_names,
         modality=input_modality,
