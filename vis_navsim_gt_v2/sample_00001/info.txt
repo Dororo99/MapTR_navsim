@@ -1,4 +1,0 @@
-Sample Index: 1
-Sample Token: sample_00001
-Num GT Labels: 41
-Label counts: {0: 36, 1: 1, 2: 4}
