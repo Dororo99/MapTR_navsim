@@ -43,56 +43,63 @@ def process_pkl_file(pkl_path, data_root, split):
             except KeyError:
                 continue
 
+            # 2. Extrinsics & CAN Bus
+            # NavSim pickle usually contains 'lidar2ego' or we assume identity if missing/pre-transformed
+            # We also need to compute can_bus (velocity) for temporal fusion
+            
+            lidar2ego_translation = frame.get('lidar2ego_translation', np.zeros(3))
+            lidar2ego_rotation = frame.get('lidar2ego_rotation', np.array([1,0,0,0])) # w,x,y,z
+            
+            # Calculate velocity for can_bus if not present
+            # can_bus: [x, y, z, rw, rx, ry, rz, vx, vy, vz, avx, avy, avz, ax, ay, az, patch_angle, ...]
+            can_bus = np.zeros(18)
+            if 'ego_status' in frame and 'velocity' in frame['ego_status']:
+                 # If explicit velocity is available
+                 vel = frame['ego_status']['velocity'] # [vx, vy, vz]
+                 can_bus[7:10] = vel
+                 # Add other fields if available
+            else:
+                 # Estimate from previous frame if possible (simple diff)
+                 # This is a fallback; ideal is to have it in the log
+                 pass 
+
+            # Update cams with lidar2cam
             cams = {}
             if 'cams' in frame:
                 raw_cams = frame['cams']
                 for cam_name, cam_info in raw_cams.items():
                     if isinstance(cam_info, dict):
-                        # 1. 이미지 절대 경로 생성
+                        # 1. Image Path
                         rel_path = cam_info.get('data_path', '')
                         if not rel_path: continue
                         
-                        # Remove split prefix if exists to avoid duplication
                         if rel_path.startswith(split + '/'):
                             rel_path = rel_path[len(split)+1:]
                         
-                        # sensor_blobs/{split}/{rel_path}
-                        # 예: /data2/.../sensor_blobs/mini/2021.../CAM_F0/xxx.jpg
                         if split == 'test':
-                             # test_sensor_blobs/test/...
                              abs_path = os.path.join(data_root, 'download', 'test_sensor_blobs', split, rel_path)
                         elif split == 'trainval':
-                             # trainval_sensor_blobs/trainval/...
                              abs_path = os.path.join(data_root, 'download', 'trainval_sensor_blobs', split, rel_path)
                         else:
                              abs_path = os.path.join(data_root, 'sensor_blobs', split, rel_path)
                         
-                        # 2. Extrinsics 계산 (sensor2lidar -> lidar2cam)
-                        # MapTR은 lidar2cam (lidar -> camera 변환 행렬)을 사용함
+                        # 2. Extrinsics - NuScenes format
+                        # NuScenes stores sensor2lidar and loader computes lidar2cam
                         if 'sensor2lidar_rotation' in cam_info:
-                            s2l_r = cam_info['sensor2lidar_rotation']
-                            s2l_t = cam_info['sensor2lidar_translation']
-                            
-                            # 4x4 행렬 생성 (Sensor -> Lidar)
-                            sensor2lidar = np.eye(4)
-                            sensor2lidar[:3, :3] = s2l_r
-                            sensor2lidar[:3, 3] = s2l_t
-                            
-                            # 역행렬 계산 (Lidar -> Sensor/Camera)
-                            try:
-                                lidar2cam = np.linalg.inv(sensor2lidar)
-                            except np.linalg.LinAlgError:
-                                lidar2cam = np.eye(4)
+                            sensor2lidar_rotation = cam_info['sensor2lidar_rotation']
+                            sensor2lidar_translation = cam_info['sensor2lidar_translation']
                         else:
-                            lidar2cam = np.eye(4) # fallback
+                            # Fallback: identity
+                            sensor2lidar_rotation = np.eye(3)
+                            sensor2lidar_translation = np.zeros(3)
 
                         cams[cam_name] = dict(
                             data_path=str(abs_path),
                             cam_intrinsic=cam_info.get('cam_intrinsic', np.eye(3)),
-                            lidar2cam_rt=lidar2cam, # [중요] 변환된 Extrinsic 저장
-                            # 아래는 MapTR 로더 호환성을 위해 남겨둠 (사용 안 할 수도 있음)
-                            sensor2ego_translation=np.zeros(3),
-                            sensor2ego_rotation=np.array([1,0,0,0]),
+                            sensor2lidar_rotation=sensor2lidar_rotation,
+                            sensor2lidar_translation=sensor2lidar_translation,
+                            sensor2ego_translation=cam_info.get('sensor2ego_translation', np.zeros(3)),
+                            sensor2ego_rotation=cam_info.get('sensor2ego_rotation', np.array([1,0,0,0])),
                         )
             
             lidar_path = frame.get('lidar_path', "")
@@ -103,13 +110,27 @@ def process_pkl_file(pkl_path, data_root, split):
                 map_location=map_location,
                 ego2global_translation=e2g_trans,
                 ego2global_rotation=e2g_rot,
+                lidar2ego_translation=lidar2ego_translation,
+                lidar2ego_rotation=lidar2ego_rotation,
                 cams=cams, 
                 timestamp=timestamp,
                 lidar_path=str(lidar_path), 
-                sample_idx=str(token)
+                sample_idx=str(token),
+                can_bus=can_bus
             ))
     except Exception as e:
         return []
+
+    # Post-process: Add prev/next/scene_token/frame_idx (temporal info)
+    # NavSim logs are already sequences, treat each log as a scene
+    scene_token = log_name  # Use log name as scene identifier
+    
+    for i, sample in enumerate(samples):
+        sample['scene_token'] = scene_token
+        sample['frame_idx'] = i
+        sample['prev'] = samples[i-1]['token'] if i > 0 else ''
+        sample['next'] = samples[i+1]['token'] if i < len(samples)-1 else ''
+        sample['sweeps'] = []  # NavSim doesn't have sweeps, leave empty
 
     return samples
 

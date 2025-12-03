@@ -1,5 +1,5 @@
 # projects/configs/maptr/maptr_tiny_r50_navsim_24e_test.py
-# CUDA_VISIBLE_DEVICES=2,3 ./tools/dist_train.sh projects/configs/maptr/maptr_tiny_r50_navsim_24e_test.py 2
+# CUDA_VISIBLE_DEVICES=2,3 ./tools/dist_train.sh projects/configs/maptr/maptr_tiny_r50_navsim_24e.py 2
 
 _base_ = [
     '../datasets/custom_nus-3d.py',
@@ -187,7 +187,7 @@ train_pipeline = [
     dict(type='RandomScaleImageMultiViewImage', scales=[0.5]),
     dict(type='PadMultiViewImage', size_divisor=32),
     dict(type='DefaultFormatBundle3D', class_names=class_names),
-    dict(type='CustomCollect3D', keys=['gt_labels_3d', 'img', 'gt_bboxes_3d'])
+    dict(type='CustomCollect3D', keys=['img'])  # NavSim only has map data, no object detection labels
 ]
 
 test_pipeline = [
@@ -210,12 +210,12 @@ test_pipeline = [
 ]
 
 data = dict(
-    samples_per_gpu=1, 
-    workers_per_gpu=4,
+    samples_per_gpu=4,  
+    workers_per_gpu=4,  # Keep low to avoid memory issues with VectorizedLocalMap
     train=dict(
         type=dataset_type,
         data_root=data_root,
-        ann_file=data_root + 'navsim_map_infos_trainval.pkl', # Use TRAINVAL split for training
+        ann_file=data_root + 'navsim_map_infos_trainval_filtered.pkl',  # Back to runtime generation
         pipeline=train_pipeline,
         classes=class_names,
         modality=input_modality,
@@ -229,12 +229,12 @@ data = dict(
         map_classes=map_classes,
         queue_length=queue_length,
         box_type_3d='LiDAR',
-        filter_empty_gt=False,
+        filter_empty_gt=True,  # Filter out samples without map annotations
         sensor_root='/home/byounggun/MapTR/data/navsim/download'),
     val=dict(type=dataset_type,
              data_root=data_root,
-             ann_file=data_root + 'navsim_map_infos_test.pkl', # Use TEST split for val
-             map_ann_file=data_root + 'navsim_map_gts_test.json', # Might not exist, but needed for config structure
+             ann_file=data_root + 'navsim_map_infos_test.pkl',  # Use test split for validation
+             # map_ann_file not needed - GT is already in PKL
              pipeline=test_pipeline,  
              bev_size=(bev_h_, bev_w_),
              pc_range=point_cloud_range,
@@ -247,7 +247,7 @@ data = dict(
     test=dict(type=dataset_type,
               data_root=data_root,
               ann_file=data_root + 'navsim_map_infos_test.pkl',
-              map_ann_file=data_root + 'navsim_map_gts_test.json',
+              # map_ann_file not needed - GT is already in PKL
               pipeline=test_pipeline, 
               bev_size=(bev_h_, bev_w_),
               pc_range=point_cloud_range,
@@ -284,7 +284,7 @@ log_config = dict(
     interval=50,
     hooks=[
         dict(type='TextLoggerHook'),
-        dict(type='TensorboardLoggerHook')
+        # dict(type='TensorboardLoggerHook')  # Disabled due to distutils compatibility issues
     ])
 fp16 = dict(loss_scale=512.)
 checkpoint_config = dict(interval=1)

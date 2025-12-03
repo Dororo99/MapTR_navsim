@@ -1,5 +1,6 @@
 import os
 import copy
+import random
 import numpy as np
 import mmcv
 import torch
@@ -10,6 +11,7 @@ from shapely.geometry import LineString, box, MultiLineString, MultiPolygon
 from shapely import affinity
 from mmdet.datasets.pipelines import to_tensor
 from pyquaternion import Quaternion
+from nuscenes.eval.common.utils import quaternion_yaw
 from .nuscenes_dataset import CustomNuScenesDataset
 
 # NuPlan Devkit Imports
@@ -335,9 +337,9 @@ class VectorizedLocalMap(object):
 
         # MapTR 클래스 <-> NuPlan 레이어 매핑
         self.layer_mapping = {
-            'divider': ['lanes_polygons', 'lane_connectors'], 
+            'divider': ['lane_dividers'], 
             'ped_crossing': ['crosswalks'],
-            'boundary': ['boundaries', 'generic_drivable_areas'],
+            'boundary': ['road_boundaries'],
             # 필요시 추가: 'centerline': ['baseline_paths']
         }
 
@@ -441,19 +443,31 @@ class CustomNavsimLocalMapDataset(CustomNuScenesDataset):
             patch_w = self.pc_range[3] - self.pc_range[0]
             self.patch_size = (patch_h, patch_w)
 
-        # VAD 스타일의 실시간 맵 로더 초기화
-        data_root = kwargs.get('data_root')
-        map_root = os.path.join(data_root, 'download', 'maps')
-        if not os.path.exists(map_root):
-            map_root = os.path.join(data_root, 'maps')
+        # Check if using pre-generated maps by loading first sample
+        use_pregenerated = False
+        if hasattr(self, 'data_infos') and len(self.data_infos) > 0:
+            first_sample = self.data_infos[0]
+            if 'map_available' in first_sample and first_sample['map_available']:
+                use_pregenerated = True
+                print(f"Using pre-generated maps - skipping VectorizedLocalMap initialization")
+        
+        # Only initialize VectorizedLocalMap if NOT using pre-generated maps
+        if not use_pregenerated:
+            print(f"Initializing VectorizedLocalMap for runtime map generation...")
+            data_root = kwargs.get('data_root')
+            map_root = os.path.join(data_root, 'download', 'maps')
+            if not os.path.exists(map_root):
+                map_root = os.path.join(data_root, 'maps')
 
-        self.vector_map = VectorizedLocalMap(
-            dataroot=data_root,
-            patch_size=self.patch_size,
-            map_classes=self.MAPCLASSES,
-            fixed_ptsnum_per_line=self.fixed_num,
-            map_root=map_root
-        )
+            self.vector_map = VectorizedLocalMap(
+                dataroot=data_root,
+                patch_size=self.patch_size,
+                map_classes=self.MAPCLASSES,
+                fixed_ptsnum_per_line=self.fixed_num,
+                map_root=map_root
+            )
+        else:
+            self.vector_map = None  # Not needed with pre-generated maps
 
     def load_annotations(self, ann_file):
         """Load annotations from ann_file.
@@ -484,20 +498,29 @@ class CustomNavsimLocalMapDataset(CustomNuScenesDataset):
         info = self.data_infos[index]
         input_dict = dict(
             sample_idx=info['token'],
-            timestamp=info['timestamp'],
-            map_location=info['map_location'], # 중요: 맵 쿼리용 키
+            pts_filename=info.get('lidar_path', ''),
+            timestamp=info['timestamp'] / 1e6,
+            map_location=info['map_location'],
             ego2global_translation=info['ego2global_translation'],
             ego2global_rotation=info['ego2global_rotation'],
+            lidar2ego_translation=info.get('lidar2ego_translation', np.zeros(3)),
+            lidar2ego_rotation=info.get('lidar2ego_rotation', np.array([1,0,0,0])),
+            # Temporal fields for queue
+            prev_idx=info.get('prev', ''),
+            next_idx=info.get('next', ''),
+            scene_token=info.get('scene_token', ''),
+            frame_idx=info.get('frame_idx', 0),
+            sweeps=info.get('sweeps', []),
         )
         
-        # Camera Path Handling (VAD 방식)
+        # Camera handling - NuScenes style
         if self.modality['use_camera']:
             image_paths = []
             lidar2img_rts = []
+            lidar2cam_rts = []
             cam_intrinsics = []
             
             for cam_name, cam_info in info['cams'].items():
-                # .pkl에는 상대 경로가 있을 수 있으므로 sensor_root와 결합
                 img_path = cam_info['data_path']
                 if self.sensor_root:
                     if img_path.startswith('data/navsim/download/'):
@@ -507,52 +530,161 @@ class CustomNavsimLocalMapDataset(CustomNuScenesDataset):
                         img_path = os.path.join(self.sensor_root, img_path)
                 image_paths.append(img_path)
                 
-                # MapTR용 행렬 구성
-                lidar2cam_rt = cam_info['lidar2cam_rt'] # 컨버터에서 계산한 값
+                # Compute lidar2cam from sensor2lidar (NuScenes way)
+                lidar2cam_r = np.linalg.inv(cam_info['sensor2lidar_rotation'])
+                lidar2cam_t = cam_info['sensor2lidar_translation'] @ lidar2cam_r.T
+                lidar2cam_rt = np.eye(4)
+                lidar2cam_rt[:3, :3] = lidar2cam_r.T
+                lidar2cam_rt[3, :3] = -lidar2cam_t
+                
                 intrinsic = cam_info['cam_intrinsic']
                 viewpad = np.eye(4)
                 viewpad[:intrinsic.shape[0], :intrinsic.shape[1]] = intrinsic
-                lidar2img_rt = (viewpad @ lidar2cam_rt)
+                lidar2img_rt = (viewpad @ lidar2cam_rt.T)
                 
                 lidar2img_rts.append(lidar2img_rt)
                 cam_intrinsics.append(viewpad)
+                lidar2cam_rts.append(lidar2cam_rt.T)
             
             input_dict.update(dict(
                 img_filename=image_paths,
                 lidar2img=lidar2img_rts,
                 cam_intrinsic=cam_intrinsics,
+                lidar2cam=lidar2cam_rts,
             ))
         
-        # CAN Bus (VAD는 pkl에 저장된 can_bus를 씀)
-        input_dict['can_bus'] = info.get('can_bus', np.zeros(18))
+        # Load can_bus from info first
+        can_bus = info.get('can_bus', np.zeros(18))
+        
+        # CAN Bus processing (same as NuScenes)
+        rotation = Quaternion(input_dict['ego2global_rotation'])
+        translation = input_dict['ego2global_translation']
+        can_bus[:3] = translation
+        can_bus[3:7] = rotation.elements # Use the elements of the Quaternion object
+        patch_angle = quaternion_yaw(rotation) / np.pi * 180
+        if patch_angle < 0:
+            patch_angle += 360
+        can_bus[-2] = patch_angle / 180 * np.pi
+        can_bus[-1] = patch_angle
+        input_dict['can_bus'] = can_bus
+        
+        # Add pre-generated map data if available
+        if 'map_available' in info and info['map_available']:
+            input_dict['map_available'] = True
+            input_dict['map_gt_labels'] = info['map_gt_labels']
+            input_dict['map_gt_pts_loc'] = info['map_gt_pts_loc']
+            input_dict['map_gt_pts_loc_shift'] = info.get('map_gt_pts_loc_shift', None)
+        
         return input_dict
 
     def vectormap_pipeline(self, example, input_dict):
-        # 런타임 맵 생성 호출
-        location = input_dict['map_location']
-        e2g_t = input_dict['ego2global_translation']
-        e2g_r = input_dict['ego2global_rotation']
-        
-        anns_results = self.vector_map.gen_vectorized_samples(location, e2g_t, e2g_r)
-        
-        gt_vecs_label = to_tensor(anns_results['gt_vecs_label'])
-        # LiDARInstanceLines 객체 전달
-        gt_vecs_pts_loc = anns_results['gt_vecs_pts_loc'] 
+        # Check if map data was pre-generated and stored in PKL
+        if 'map_available' in input_dict and input_dict['map_available']:
+            # Use pre-generated map data (much faster!)
+            gt_vecs_label = to_tensor(input_dict['map_gt_labels'])
+            
+            # Reconstruct LiDARInstanceLines from stored data
+            fixed_pts = input_dict['map_gt_pts_loc']
+            
+            # Create dummy LiDARInstanceLines for compatibility
+            instance_lines = LiDARInstanceLines(
+                [], 1, 250, False, self.fixed_num, self.padding_value, 
+                patch_size=self.patch_size
+            )
+            # Override with pre-generated data
+            instance_lines._fixed_pts = torch.from_numpy(fixed_pts).float()
+            
+            gt_vecs_pts_loc = instance_lines
+        else:
+            # Fall back to runtime generation (slower)
+            location = input_dict['map_location']
+            e2g_t = input_dict['ego2global_translation']
+            e2g_r = input_dict['ego2global_rotation']
+            l2e_t = input_dict['lidar2ego_translation']
+            l2e_r = input_dict['lidar2ego_rotation']
+
+            # Compute Lidar2Global
+            T_global_ego = np.eye(4)
+            T_global_ego[:3, :3] = Quaternion(e2g_r).rotation_matrix
+            T_global_ego[:3, 3] = e2g_t
+
+            T_ego_lidar = np.eye(4)
+            T_ego_lidar[:3, :3] = Quaternion(l2e_r).rotation_matrix
+            T_ego_lidar[:3, 3] = l2e_t
+
+            T_global_lidar = T_global_ego @ T_ego_lidar
+            
+            l2g_t = T_global_lidar[:3, 3]
+            l2g_r = Quaternion(matrix=T_global_lidar[:3, :3]).elements
+
+            anns_results = self.vector_map.gen_vectorized_samples(location, l2g_t, l2g_r)
+            
+            gt_vecs_label = to_tensor(anns_results['gt_vecs_label'])
+            gt_vecs_pts_loc = anns_results['gt_vecs_pts_loc']
         
         example['gt_labels_3d'] = DC(gt_vecs_label, cpu_only=False)
         example['gt_bboxes_3d'] = DC(gt_vecs_pts_loc, cpu_only=True)
         return example
     
+    
     def prepare_train_data(self, index):
-        input_dict = self.get_data_info(index)
-        if input_dict is None:
-            return None
-        self.pre_pipeline(input_dict)
-        example = self.pipeline(input_dict)
-        if self.filter_empty_gt and \
-                (example is None or ~(example['gt_labels_3d']._data != -1).any()):
-            return None
-        example = self.vectormap_pipeline(example, input_dict)
-        
-        # MapTR expects a queue dimension (even if length is 1)
-        return self.union2one([example])
+        """
+        Training data preparation with temporal queue.
+        Args:
+            index (int): Index for accessing the target data.
+        Returns:
+            dict: Training data dict of the corresponding index.
+        """
+        queue = []
+
+        # NuScenes pattern: shuffle prev frames, sort, then add current
+        index_list = list(range(index-self.queue_length, index))
+        random.shuffle(index_list)
+        index_list = sorted(index_list[1:])
+        index_list.append(index)
+
+        for i in index_list:
+            i = max(0, i)
+            input_dict = self.get_data_info(i)
+            if input_dict is None:
+                return None
+            self.pre_pipeline(input_dict)
+            example = self.pipeline(input_dict)
+            example = self.vectormap_pipeline(example, input_dict)
+            if self.filter_empty_gt and \
+                    (example is None or ~(example['gt_labels_3d']._data != -1).any()):
+                return None
+            queue.append(example)
+        return self.union2one(queue)
+
+    def union2one(self, queue):
+        """
+        convert sample queue into one single sample.
+        """
+        imgs_list = [each['img'].data for each in queue]
+        metas_map = {}
+        prev_scene_token = None
+        prev_pos = None
+        prev_angle = None
+        for i, each in enumerate(queue):
+            metas_map[i] = each['img_metas'].data
+            if metas_map[i]['scene_token'] != prev_scene_token:
+                metas_map[i]['prev_bev_exists'] = False
+                prev_scene_token = metas_map[i]['scene_token']
+                prev_pos = copy.deepcopy(metas_map[i]['can_bus'][:3])
+                prev_angle = copy.deepcopy(metas_map[i]['can_bus'][-1])
+                metas_map[i]['can_bus'][:3] = 0
+                metas_map[i]['can_bus'][-1] = 0
+            else:
+                metas_map[i]['prev_bev_exists'] = True
+                tmp_pos = copy.deepcopy(metas_map[i]['can_bus'][:3])
+                tmp_angle = copy.deepcopy(metas_map[i]['can_bus'][-1])
+                metas_map[i]['can_bus'][:3] -= prev_pos
+                metas_map[i]['can_bus'][-1] -= prev_angle
+                prev_pos = copy.deepcopy(tmp_pos)
+                prev_angle = copy.deepcopy(tmp_angle)
+
+        queue[-1]['img'] = DC(torch.stack(imgs_list), cpu_only=False, stack=True)
+        queue[-1]['img_metas'] = DC(metas_map, cpu_only=True)
+        queue = queue[-1]
+        return queue
